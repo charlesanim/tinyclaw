@@ -10,8 +10,12 @@ dist/
 .tinyclaw/whatsapp-session/
 .tinyclaw/queue/
 .tinyclaw/reset_flag
+.tinyclaw/settings.json
 .wwebjs_cache
 *.log
+
+# Environment variables
+.env
 
 # OS files
 .DS_Store

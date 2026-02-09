@@ -1,52 +1,43 @@
 # TinyClaw 🦞
 
-Minimal multi-channel AI assistant with WhatsApp integration and queue-based architecture.
+Minimal multi-channel AI assistant with Discord and WhatsApp integration.
 
 ## 🎯 What is TinyClaw?
 
 TinyClaw is a lightweight wrapper around [Claude Code](https://claude.com/claude-code) that:
 
-- ✅ Connects WhatsApp (via QR code)
+- ✅ Connects Discord (via bot token) and WhatsApp (via QR code)
 - ✅ Processes messages sequentially (no race conditions)
 - ✅ Maintains conversation context
 - ✅ Runs 24/7 in tmux
-- ✅ Ready for multi-channel (Telegram, etc.)
+- ✅ Multi-channel ready (Telegram, Slack, etc.)
 
-**Key innovation:** File-based queue system prevents race conditions and enables multi-channel support.
+**Key innovation:** File-based queue system prevents race conditions and enables seamless multi-channel support.
 
 ## 📐 Architecture
 
 ```
 ┌─────────────────┐
-│  WhatsApp       │──┐
+│  Discord        │──┐
 │  Client         │  │
 └─────────────────┘  │
-                     ├──→ Queue (incoming/)
-┌─────────────────┐  │        ↓
-│  Telegram       │──┤   ┌──────────────┐
-│  (future)       │  │   │   Queue      │
-└─────────────────┘  │   │  Processor   │
-                     │   └──────────────┘
-Other Channels ──────┘        ↓
-                         claude --dangerously-skip-permissions -c -p
-                              ↓
-                         Queue (outgoing/)
-                              ↓
-                    ┌─────────────────┐
-                    │ Channels send   │
-                    │ responses       │
-                    └─────────────────┘
-```
-
-### Tmux Layout
-
-```
-┌──────────────┬──────────────┐
-│  WhatsApp    │    Queue     │
-│  Client      │  Processor   │
-├──────────────┼──────────────┤
-│  Heartbeat   │    Logs      │
-└──────────────┴──────────────┘
+                     │
+┌─────────────────┐  │
+│  WhatsApp       │──┤
+│  Client         │  │
+└─────────────────┘  ├──→ Queue (incoming/)
+                     │        ↓
+┌─────────────────┐  │   ┌──────────────┐
+│  Other Channels │──┤   │   Queue      │
+│  (future)       │  │   │  Processor   │
+└─────────────────┘  │   └──────────────┘
+                     │        ↓
+                     │   claude -c -p
+                     │        ↓
+                     │   Queue (outgoing/)
+                     │        ↓
+                     └──> Channels send
+                          responses
 ```
 
 ## 🚀 Quick Start
@@ -61,21 +52,72 @@ Other Channels ──────┘        ↓
 ### Installation
 
 ```bash
-cd /Users/jliao/workspace/tinyclaw
+cd /path/to/tinyclaw
 
 # Install dependencies
 npm install
 
-# Make scripts executable
-chmod +x *.sh *.js
-
-# Start TinyClaw
+# Start TinyClaw (first run triggers setup wizard)
 ./tinyclaw.sh start
 ```
 
-### First Run
+### First Run - Setup Wizard
 
-A QR code will appear in your terminal:
+On first start, you'll see an interactive setup wizard:
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  TinyClaw - Setup Wizard
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Which messaging channel do you want to use?
+
+  1) Discord
+  2) WhatsApp
+  3) Both
+
+Choose [1-3]: 3
+
+✓ Channel: both
+
+Enter your Discord bot token:
+(Get one at: https://discord.com/developers/applications)
+
+Token: YOUR_DISCORD_BOT_TOKEN_HERE
+
+✓ Discord token saved
+
+Which Claude model?
+
+  1) Sonnet  (fast, recommended)
+  2) Opus    (smartest)
+
+Choose [1-2]: 1
+
+✓ Model: sonnet
+
+Heartbeat interval (seconds)?
+(How often Claude checks in proactively)
+
+Interval [default: 500]: 500
+
+✓ Heartbeat interval: 500s
+
+✓ Configuration saved to .tinyclaw/settings.json
+```
+
+### Discord Setup
+
+1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
+2. Create a new application
+3. Go to "Bot" section and create a bot
+4. Copy the bot token
+5. Enable "Message Content Intent" in Bot settings
+6. Invite the bot to your server using OAuth2 URL Generator
+
+### WhatsApp Setup
+
+After starting, a QR code will appear if WhatsApp is enabled:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -92,11 +134,9 @@ Scan it with your phone. **Done!** 🎉
 
 ### Test It
 
-Send a WhatsApp message to yourself from a different WhatsApp account:
+**Discord:** Send a DM to your bot or mention it in a channel
 
-```
-"Hello Claude!"
-```
+**WhatsApp:** Send a message to the connected number
 
 You'll get a response! 🤖
 
@@ -105,6 +145,9 @@ You'll get a response! 🤖
 ```bash
 # Start TinyClaw
 ./tinyclaw.sh start
+
+# Run setup wizard (change channels/model/heartbeat)
+./tinyclaw.sh setup
 
 # Check status
 ./tinyclaw.sh status
@@ -115,12 +158,26 @@ You'll get a response! 🤖
 # Reset conversation
 ./tinyclaw.sh reset
 
+# Reset channel authentication
+./tinyclaw.sh channels reset whatsapp  # Clear WhatsApp session
+./tinyclaw.sh channels reset discord   # Shows Discord reset instructions
+
+# Switch Claude model
+./tinyclaw.sh model           # Show current model
+./tinyclaw.sh model sonnet    # Switch to Sonnet (fast)
+./tinyclaw.sh model opus      # Switch to Opus (smartest)
+
 # View logs
-./tinyclaw.sh logs whatsapp
-./tinyclaw.sh logs queue
+./tinyclaw.sh logs whatsapp   # WhatsApp activity
+./tinyclaw.sh logs discord    # Discord activity
+./tinyclaw.sh logs queue      # Queue processing
+./tinyclaw.sh logs heartbeat  # Heartbeat checks
 
 # Attach to tmux
 ./tinyclaw.sh attach
+
+# Restart
+./tinyclaw.sh restart
 
 # Stop
 ./tinyclaw.sh stop
@@ -128,27 +185,43 @@ You'll get a response! 🤖
 
 ## 🔧 Components
 
-### 1. whatsapp-client.js
+### 1. setup-wizard.sh
+
+- Interactive setup on first run
+- Configures channels (Discord/WhatsApp/Both)
+- Collects Discord bot token
+- Selects Claude model
+- Writes to `.tinyclaw/settings.json`
+
+### 2. discord-client.ts
+
+- Connects to Discord via bot token
+- Listens for DMs and mentions
+- Writes incoming messages to queue
+- Reads responses from queue
+- Sends replies back
+
+### 3. whatsapp-client.ts
 
 - Connects to WhatsApp via QR code
 - Writes incoming messages to queue
 - Reads responses from queue
 - Sends replies back
 
-### 2. queue-processor.js
+### 4. queue-processor.ts
 
 - Polls incoming queue
 - Processes **ONE message at a time**
 - Calls `claude -c -p`
 - Writes responses to outgoing queue
 
-### 3. heartbeat-cron.sh
+### 5. heartbeat-cron.sh
 
 - Runs every 5 minutes
 - Sends heartbeat via queue
 - Keeps conversation active
 
-### 4. tinyclaw.sh
+### 6. tinyclaw.sh
 
 - Main orchestrator
 - Manages tmux session
@@ -157,19 +230,19 @@ You'll get a response! 🤖
 ## 💬 Message Flow
 
 ```
-WhatsApp message arrives
+Discord/WhatsApp message arrives
        ↓
-whatsapp-client.js writes to:
-  .tinyclaw/queue/incoming/whatsapp_<id>.json
+Client writes to:
+  .tinyclaw/queue/incoming/{discord|whatsapp}_<id>.json
        ↓
-queue-processor.js picks it up
+queue-processor.ts picks it up
        ↓
 Runs: claude -c -p "message"
        ↓
 Writes to:
-  .tinyclaw/queue/outgoing/whatsapp_<id>.json
+  .tinyclaw/queue/outgoing/{discord|whatsapp}_<id>.json
        ↓
-whatsapp-client.js sends response
+Client reads and sends response
        ↓
 User receives reply
 ```
@@ -182,16 +255,26 @@ tinyclaw/
 │   ├── settings.json     # Hooks config
 │   └── hooks/            # Hook scripts
 ├── .tinyclaw/            # TinyClaw data
+│   ├── settings.json     # Configuration (channel, model, tokens)
 │   ├── queue/
 │   │   ├── incoming/     # New messages
 │   │   ├── processing/   # Being processed
 │   │   └── outgoing/     # Responses
 │   ├── logs/
+│   │   ├── discord.log
+│   │   ├── whatsapp.log
+│   │   ├── queue.log
+│   │   └── heartbeat.log
+│   ├── channels/         # Runtime channel data
 │   ├── whatsapp-session/
 │   └── heartbeat.md
+├── src/
+│   ├── discord-client.ts    # Discord I/O
+│   ├── whatsapp-client.ts   # WhatsApp I/O
+│   └── queue-processor.ts   # Message processing
+├── dist/                 # TypeScript build output
+├── setup-wizard.sh       # Interactive setup
 ├── tinyclaw.sh           # Main script
-├── whatsapp-client.js    # WhatsApp I/O
-├── queue-processor.js    # Message processing
 └── heartbeat-cron.sh     # Health checks
 ```
 
@@ -211,13 +294,26 @@ Next message starts fresh (no conversation history).
 
 ## ⚙️ Configuration
 
-### Heartbeat Interval
+### Settings File
 
-Edit `heartbeat-cron.sh`:
+All configuration is stored in `.tinyclaw/settings.json`:
 
-```bash
-INTERVAL=300  # seconds (5 minutes)
+```json
+{
+  "channel": "both",
+  "model": "sonnet",
+  "discord_bot_token": "YOUR_TOKEN_HERE",
+  "heartbeat_interval": 500
+}
 ```
+
+To reconfigure, run:
+```bash
+./tinyclaw.sh setup
+```
+
+The heartbeat interval is in seconds (default: 500s = ~8 minutes).
+This controls how often Claude proactively checks in.
 
 ### Heartbeat Prompt
 
@@ -273,22 +369,30 @@ Message 2 → Wait → Process → Done
 Message 3 → Wait → Process → Done
 ```
 
-### ✅ Multi-Channel Ready
+### ✅ Multi-Channel Support
 
-Add Telegram by creating `telegram-client.js`:
+Discord and WhatsApp work seamlessly together. Add more channels easily:
 
-```javascript
+**Example: Add Telegram**
+
+```typescript
+// telegram-client.ts
 // Write to queue
 fs.writeFileSync(
   '.tinyclaw/queue/incoming/telegram_<id>.json',
-  JSON.stringify({ channel: 'telegram', message, ... })
+  JSON.stringify({
+    channel: 'telegram',
+    message,
+    chatId,
+    timestamp
+  })
 );
 
-// Read responses
-// Same format as WhatsApp
+// Read responses from outgoing queue
+// Same format as Discord/WhatsApp
 ```
 
-Queue processor handles it automatically!
+Queue processor handles all channels automatically!
 
 ### ✅ Clean Responses
 
@@ -325,9 +429,19 @@ WhatsApp session persists across restarts:
 # Check logs
 ./tinyclaw.sh logs whatsapp
 
-# Re-authenticate
-rm -rf .tinyclaw/whatsapp-session/
+# Reset WhatsApp authentication
+./tinyclaw.sh channels reset whatsapp
 ./tinyclaw.sh restart
+```
+
+### Discord not connecting
+
+```bash
+# Check logs
+./tinyclaw.sh logs discord
+
+# Update Discord bot token
+./tinyclaw.sh setup
 ```
 
 ### Messages not processing
@@ -398,14 +512,16 @@ Claude: [fixes and commits]
 ### Multi-Device
 
 - WhatsApp on phone
-- Telegram on desktop
+- Discord on desktop/mobile
 - CLI for scripts
-  All share the same Claude conversation!
+
+All channels share the same Claude conversation!
 
 ## 🙏 Credits
 
 - Inspired by [OpenClaw](https://openclaw.ai/) by Peter Steinberger
 - Built on [Claude Code](https://claude.com/claude-code)
+- Uses [discord.js](https://discord.js.org/)
 - Uses [whatsapp-web.js](https://github.com/pedroslopez/whatsapp-web.js)
 
 ## 📄 License

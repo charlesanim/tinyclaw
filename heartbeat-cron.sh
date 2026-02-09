@@ -5,7 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HEARTBEAT_FILE="$SCRIPT_DIR/.tinyclaw/heartbeat.md"
 LOG_FILE="$SCRIPT_DIR/.tinyclaw/logs/heartbeat.log"
 QUEUE_INCOMING="$SCRIPT_DIR/.tinyclaw/queue/incoming"
-INTERVAL=300  # 5 minutes
+SETTINGS_FILE="$SCRIPT_DIR/.tinyclaw/settings.json"
+
+# Read interval from settings.json, default to 500
+if [ -f "$SETTINGS_FILE" ]; then
+    INTERVAL=$(grep -o '"heartbeat_interval"[[:space:]]*:[[:space:]]*[0-9]*' "$SETTINGS_FILE" | grep -o '[0-9]*$')
+fi
+INTERVAL=${INTERVAL:-500}
 
 mkdir -p "$QUEUE_INCOMING"
 
