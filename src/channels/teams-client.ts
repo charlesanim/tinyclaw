@@ -27,8 +27,9 @@ const QUEUE_OUTGOING = path.join(TINYCLAW_HOME, 'queue/outgoing');
 const LOG_FILE = path.join(TINYCLAW_HOME, 'logs/msteams.log');
 const SETTINGS_FILE = path.join(TINYCLAW_HOME, 'settings.json');
 const PAIRING_FILE = path.join(TINYCLAW_HOME, 'pairing.json');
+const FILES_DIR = path.join(TINYCLAW_HOME, 'files');
 
-[QUEUE_INCOMING, QUEUE_OUTGOING, path.dirname(LOG_FILE)].forEach(dir => {
+[QUEUE_INCOMING, QUEUE_OUTGOING, path.dirname(LOG_FILE), FILES_DIR].forEach(dir => {
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
     }
@@ -72,7 +73,13 @@ function log(level: string, message: string): void {
 function getTeamsConfig(): { appId: string; appPassword: string; port: number } {
     const envAppId = process.env.MSTEAMS_APP_ID || process.env.MICROSOFT_APP_ID || '';
     const envAppPassword = process.env.MSTEAMS_APP_PASSWORD || process.env.MICROSOFT_APP_PASSWORD || '';
-    const envPort = parseInt(process.env.MSTEAMS_PORT || process.env.PORT || '3978', 10);
+    // Only use env port if MSTEAMS_PORT was explicitly set (not PORT, which may be set by other tools)
+    const envPortRaw = process.env.MSTEAMS_PORT;
+    const envPort = envPortRaw ? parseInt(envPortRaw, 10) : undefined;
+
+    let cfgPort: number | undefined;
+    let cfgAppId = '';
+    let cfgAppPassword = '';
 
     try {
         if (fs.existsSync(SETTINGS_FILE)) {
@@ -87,20 +94,19 @@ function getTeamsConfig(): { appId: string; appPassword: string; port: number } 
                 };
             };
             const cfg = settings.channels?.teams;
-            return {
-                appId: envAppId || cfg?.app_id || '',
-                appPassword: envAppPassword || cfg?.app_password || '',
-                port: Number.isFinite(envPort) ? envPort : (cfg?.port || 3978),
-            };
+            cfgAppId = cfg?.app_id || '';
+            cfgAppPassword = cfg?.app_password || '';
+            cfgPort = cfg?.port;
         }
     } catch (error) {
         log('WARN', `Failed to parse settings.json for Teams config: ${(error as Error).message}`);
     }
 
     return {
-        appId: envAppId,
-        appPassword: envAppPassword,
-        port: Number.isFinite(envPort) ? envPort : 3978,
+        appId: envAppId || cfgAppId,
+        appPassword: envAppPassword || cfgAppPassword,
+        // Explicit env var > settings.json > default 3978
+        port: (envPort && Number.isFinite(envPort)) ? envPort : (cfgPort || 3978),
     };
 }
 
@@ -196,6 +202,110 @@ function cleanTeamsText(raw: string): string {
         .trim();
 }
 
+function sanitizeFileName(fileName: string): string {
+    const baseName = path.basename(fileName).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim();
+    return baseName.length > 0 ? baseName : 'file.bin';
+}
+
+function buildUniqueFilePath(dir: string, preferredName: string): string {
+    const cleanName = sanitizeFileName(preferredName);
+    const ext = path.extname(cleanName);
+    const stem = path.basename(cleanName, ext);
+    let candidate = path.join(dir, cleanName);
+    let counter = 1;
+    while (fs.existsSync(candidate)) {
+        candidate = path.join(dir, `${stem}_${counter}${ext}`);
+        counter++;
+    }
+    return candidate;
+}
+
+function extFromContentType(contentType?: string): string {
+    if (!contentType) return '.bin';
+    const map: Record<string, string> = {
+        'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
+        'image/webp': '.webp', 'audio/ogg': '.ogg', 'audio/mpeg': '.mp3',
+        'video/mp4': '.mp4', 'application/pdf': '.pdf',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+        'text/plain': '.txt',
+    };
+    return map[contentType] || '.bin';
+}
+
+async function downloadTeamsAttachment(
+    contentUrl: string, fileName: string, messageId: string,
+): Promise<string | null> {
+    try {
+        const https = await import('https');
+        const http = await import('http');
+        const ext = path.extname(fileName) || '.bin';
+        const localName = `msteams_${messageId}_${sanitizeFileName(fileName)}`;
+        const localPath = buildUniqueFilePath(FILES_DIR, localName);
+
+        await new Promise<void>((resolve, reject) => {
+            const get = contentUrl.startsWith('https') ? https.get : http.get;
+            const file = fs.createWriteStream(localPath);
+            get(contentUrl, (response) => {
+                if (response.statusCode === 301 || response.statusCode === 302) {
+                    file.close();
+                    fs.unlinkSync(localPath);
+                    const redirectUrl = response.headers.location;
+                    if (redirectUrl) {
+                        downloadTeamsAttachment(redirectUrl, fileName, messageId)
+                            .then(() => resolve()).catch(reject);
+                    } else {
+                        reject(new Error('Redirect without location header'));
+                    }
+                    return;
+                }
+                response.pipe(file);
+                file.on('finish', () => { file.close(); resolve(); });
+            }).on('error', (err) => {
+                fs.unlink(localPath, () => {});
+                reject(err);
+            });
+        });
+
+        log('INFO', `Downloaded Teams attachment: ${path.basename(localPath)}`);
+        return localPath;
+    } catch (error) {
+        log('ERROR', `Failed to download Teams attachment: ${(error as Error).message}`);
+        return null;
+    }
+}
+
+async function handleResetCommand(context: TurnContext, argsText: string): Promise<void> {
+    if (!argsText) {
+        await context.sendActivity('Usage: /reset @agent_id [@agent_id2 ...]\nSpecify which agent(s) to reset.');
+        return;
+    }
+    try {
+        const settingsData = fs.readFileSync(SETTINGS_FILE, 'utf8');
+        const settings = JSON.parse(settingsData);
+        const agents = settings.agents || {};
+        const workspacePath = settings?.workspace?.path || path.join(require('os').homedir(), 'tinyclaw-workspace');
+        const agentArgs = argsText.split(/\s+/).map(a => a.replace(/^@/, '').toLowerCase());
+        const resetResults: string[] = [];
+        for (const agentId of agentArgs) {
+            if (!agents[agentId]) {
+                resetResults.push(`Agent '${agentId}' not found.`);
+                continue;
+            }
+            const flagDir = path.join(workspacePath, agentId);
+            if (!fs.existsSync(flagDir)) fs.mkdirSync(flagDir, { recursive: true });
+            fs.writeFileSync(path.join(flagDir, 'reset_flag'), 'reset');
+            resetResults.push(`Reset @${agentId} (${agents[agentId].name}).`);
+        }
+        await context.sendActivity(resetResults.join('\n'));
+    } catch {
+        await context.sendActivity('Could not process reset command. Check settings.');
+    }
+}
+
+// Store conversation references by senderId for proactive messaging
+const senderReferences = new Map<string, Partial<ConversationReference>>();
+
 const teamsConfig = getTeamsConfig();
 if (!teamsConfig.appId || !teamsConfig.appPassword) {
     console.error('ERROR: Microsoft Teams app credentials are missing.');
@@ -253,6 +363,10 @@ class TeamsQueueBot extends ActivityHandler {
                     return;
                 }
 
+                // Store conversation reference for proactive messaging
+                const reference = TurnContext.getConversationReference(activity);
+                senderReferences.set(senderId, reference);
+
                 if (text.match(/^[!/]agent$/i)) {
                     await context.sendActivity(getAgentListText());
                     return;
@@ -263,15 +377,37 @@ class TeamsQueueBot extends ActivityHandler {
                     return;
                 }
 
+                // /reset command
+                const resetMatchBare = text.match(/^[!/]reset$/i);
+                const resetMatchArgs = text.match(/^[!/]reset\s+(.+)$/i);
+                if (resetMatchBare) {
+                    await handleResetCommand(context, '');
+                    return;
+                }
+                if (resetMatchArgs) {
+                    await handleResetCommand(context, resetMatchArgs[1]);
+                    return;
+                }
+
                 const messageId = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
                 let messageText = text;
+                const downloadedFiles: string[] = [];
 
+                // Download attachments to local files
                 if (hasAttachments) {
-                    const attachmentLabels = activity.attachments!.map((att, idx) => {
-                        const name = att.name || `attachment_${idx + 1}`;
-                        return `[Attachment: ${name}]`;
-                    });
-                    messageText = [messageText, ...attachmentLabels].filter(Boolean).join('\n');
+                    for (const att of activity.attachments!) {
+                        if (att.contentUrl) {
+                            const fileName = att.name || `attachment_${Date.now()}${extFromContentType(att.contentType)}`;
+                            const localPath = await downloadTeamsAttachment(att.contentUrl, fileName, messageId);
+                            if (localPath) downloadedFiles.push(localPath);
+                        }
+                    }
+                }
+
+                // Add file references to message text (same pattern as other channels)
+                if (downloadedFiles.length > 0) {
+                    const fileRefs = downloadedFiles.map(f => `[file: ${f}]`).join('\n');
+                    messageText = messageText ? `${messageText}\n\n${fileRefs}` : fileRefs;
                 }
 
                 const queueData: QueueData = {
@@ -281,12 +417,12 @@ class TeamsQueueBot extends ActivityHandler {
                     message: messageText,
                     timestamp: Date.now(),
                     messageId,
+                    files: downloadedFiles.length > 0 ? downloadedFiles : undefined,
                 };
 
                 const queueFile = path.join(QUEUE_INCOMING, `msteams_${messageId}.json`);
                 fs.writeFileSync(queueFile, JSON.stringify(queueData, null, 2));
 
-                const reference = TurnContext.getConversationReference(activity);
                 pendingMessages.set(messageId, {
                     reference,
                     sender: senderName,
@@ -334,29 +470,61 @@ async function processOutgoingQueue(): Promise<void> {
             const filePath = path.join(QUEUE_OUTGOING, fileName);
             try {
                 const data: ResponseData = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                const responseText = data.message || '';
                 const pending = pendingMessages.get(data.messageId);
-                if (!pending) {
-                    log('WARN', `No pending Teams message found for response ${data.messageId}`);
+
+                // Resolve conversation reference: pending message or proactive via senderId
+                const ref = pending?.reference
+                    || (data.senderId ? senderReferences.get(data.senderId) : undefined);
+
+                if (!ref) {
+                    log('WARN', `No conversation reference for Teams response ${data.messageId} (senderId: ${data.senderId || 'none'})`);
                     fs.unlinkSync(filePath);
                     continue;
                 }
 
-                await adapter.continueConversationAsync(teamsConfig.appId, pending.reference, async (context) => {
-                    const chunks = splitMessage(data.message);
-                    for (const chunk of chunks) {
-                        await context.sendActivity(chunk);
+                await adapter.continueConversationAsync(teamsConfig.appId, ref, async (context) => {
+                    // Send file attachments as file download cards
+                    if (data.files && data.files.length > 0) {
+                        for (const file of data.files) {
+                            try {
+                                if (!fs.existsSync(file)) continue;
+                                const fileName = path.basename(file);
+                                const fileBuffer = fs.readFileSync(file);
+                                const base64 = fileBuffer.toString('base64');
+                                const ext = path.extname(file).toLowerCase();
+                                const contentType = {
+                                    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+                                    '.gif': 'image/gif', '.pdf': 'application/pdf',
+                                    '.mp3': 'audio/mpeg', '.mp4': 'video/mp4',
+                                }[ext] || 'application/octet-stream';
+                                await context.sendActivity({
+                                    type: 'message',
+                                    attachments: [{
+                                        name: fileName,
+                                        contentType,
+                                        contentUrl: `data:${contentType};base64,${base64}`,
+                                    }],
+                                });
+                                log('INFO', `Sent Teams file: ${fileName}`);
+                            } catch (fileErr) {
+                                log('ERROR', `Failed to send Teams file ${file}: ${(fileErr as Error).message}`);
+                            }
+                        }
                     }
 
-                    if (data.files && data.files.length > 0) {
-                        await context.sendActivity(
-                            `Files generated by TinyClaw:\n${data.files.map(f => `- ${f}`).join('\n')}`
-                        );
+                    // Send message text (guard against empty)
+                    if (responseText.trim()) {
+                        const chunks = splitMessage(responseText);
+                        for (const chunk of chunks) {
+                            await context.sendActivity(chunk);
+                        }
                     }
                 });
 
-                pendingMessages.delete(data.messageId);
+                if (pending) pendingMessages.delete(data.messageId);
                 fs.unlinkSync(filePath);
-                log('INFO', `Sent Teams response to ${pending.sender}`);
+                log('INFO', `Sent Teams response to ${data.sender}${!pending ? ' (proactive)' : ''}`);
             } catch (error) {
                 log('ERROR', `Failed processing Teams outgoing ${fileName}: ${(error as Error).message}`);
             }
